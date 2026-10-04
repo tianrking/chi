@@ -1,0 +1,61 @@
+name: Charset native validation
+on:
+  push:
+    branches: [codex/charset-native-validation]
+permissions:
+  contents: read
+jobs:
+  original-red:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: 627048297ad8fdc3ef8a6d20847d4d6546b793a7
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: 1.24.x
+          cache: false
+      - name: Prove original production and native regression failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          git rev-parse HEAD > artifacts/source-sha.txt
+          git rev-parse HEAD:middleware/content_charset.go > artifacts/production-blob.txt
+          git rev-parse HEAD:middleware/content_charset_test.go > artifacts/test-blob.txt
+          git diff --exit-code 167e1e3bd039d060696b99c8da4e876ae04f42c1 -- middleware/content_charset.go
+          test "$(cat artifacts/source-sha.txt)" = 627048297ad8fdc3ef8a6d20847d4d6546b793a7
+          test "$(cat artifacts/production-blob.txt)" = 55773517cb711bf9f5a378faf2e8335fbf8df9c6
+          go version > artifacts/go-version.txt
+          go env GOVERSION GOOS GOARCH > artifacts/go-environment.txt
+          set +e
+          go test -race -json ./middleware -run '^TestContentCharsetMediaParameters' 2>&1 | tee artifacts/focused.jsonl
+          result=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$result" > artifacts/focused.exit
+          test "$result" -eq 1
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          rows = []
+          for line in Path('artifacts/focused.jsonl').read_text().splitlines():
+              if line.startswith('{'):
+                  rows.append(json.loads(line))
+          leaf = [r for r in rows if r.get('Action') in ('pass', 'fail') and
+                  ((r.get('Test', '').startswith('TestContentCharsetMediaParameters/') and r['Test'].count('/') == 1) or
+                   (r.get('Test', '').startswith('TestContentCharsetMediaParametersOverHTTP/') and r['Test'].count('/') == 2))]
+          failures = [r['Test'] for r in leaf if r['Action'] == 'fail']
+          passes = [r['Test'] for r in leaf if r['Action'] == 'pass']
+          assert len(failures) == 13 and len(passes) == 7, (failures, passes)
+          assert any('status = 415, want 202' in r.get('Output', '') for r in rows)
+          Path('artifacts/regression-summary.json').write_text(json.dumps({'source':'627048297ad8fdc3ef8a6d20847d4d6546b793a7', 'nativeExit':1, 'failed':failures, 'passed':passes}, indent=2))
+          PY
+          gofmt -d middleware/content_charset_test.go > artifacts/gofmt.diff
+          sha256sum artifacts/* > artifacts/SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: charset-original-red
+          path: artifacts/
