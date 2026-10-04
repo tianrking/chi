@@ -1,0 +1,138 @@
+name: Charset native green validation
+on:
+  push:
+    branches: [codex/charset-native-final]
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+        go: [1.24.x, 1.25.x, 1.26.x, 1.27.x]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: 35fea3e25b3e1e02f154fc5bd4213070b309ad15
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+      - name: Record exact native source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          git rev-parse HEAD > artifacts/source-sha.txt
+          git rev-parse HEAD:middleware/content_charset.go > artifacts/production-blob.txt
+          git rev-parse HEAD:middleware/content_charset_test.go > artifacts/test-blob.txt
+          test "$(cat artifacts/source-sha.txt)" = 35fea3e25b3e1e02f154fc5bd4213070b309ad15
+          test "$(cat artifacts/test-blob.txt)" = 7d90b04bd596265d37e1f07bcb1cea6448e45a10
+          git diff --exit-code 9553bd4cd1b1ded136518fa834ebee1149be5e0d -- middleware/content_charset_test.go
+          go version > artifacts/go-version.txt
+          go env GOVERSION GOOS GOARCH > artifacts/go-environment.txt
+      - name: Frozen regressions with race detector
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          go test -race -json ./middleware -run '^TestContentCharsetMediaParameters' 2>&1 | tee artifacts/focused.jsonl
+          result=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$result" > artifacts/focused.exit
+          test "$result" -eq 0
+      - name: Official full make test
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          make test 2>&1 | tee artifacts/make-test.log
+          result=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$result" > artifacts/make-test.exit
+          test "$result" -eq 0
+      - name: Full vet
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          go vet ./... 2>&1 | tee artifacts/vet.log
+          result=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$result" > artifacts/vet.exit
+          test "$result" -eq 0
+      - name: Scoped goimports
+        if: matrix.os == 'ubuntu-24.04' && matrix.go == '1.24.x'
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install golang.org/x/tools/cmd/goimports@v0.31.0
+          "$(go env GOPATH)/bin/goimports" -l middleware/content_charset.go middleware/content_charset_test.go > artifacts/goimports.txt
+          test ! -s artifacts/goimports.txt
+      - name: Hash native evidence
+        if: always()
+        shell: bash
+        run: |
+          sha256sum artifacts/* > artifacts/SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: charset-green-${{ matrix.os }}-${{ matrix.go }}
+          path: artifacts/
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: 35fea3e25b3e1e02f154fc5bd4213070b309ad15
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: 1.24.x
+          cache: false
+      - name: Compare parser cost on the same native runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          go version > artifacts/go-version.txt
+          cat > artifacts/benchmark-fixture.txt <<'GO'
+          package middleware
+          import "testing"
+          var charsetBenchmarkAccepted bool
+          func BenchmarkContentCharsetMediaParameters(b *testing.B) {
+              for _, tc := range []struct{name, header string}{
+                  {"unquoted", `text/plain; charset=UTF-8`},
+                  {"quoted", `text/plain; charset="UTF-8"`},
+                  {"quoted-pair", `text/plain; charset="UTF\-8"`},
+                  {"metadata", `text/plain; note="first; charset=latin-1"; charset=utf-8`},
+              } {
+                  b.Run(tc.name, func(b *testing.B) {
+                      b.ReportAllocs()
+                      for i := 0; i < b.N; i++ {
+                          charsetBenchmarkAccepted = contentEncoding(tc.header, "utf-8", "")
+                      }
+                  })
+              }
+          }
+          GO
+          cp artifacts/benchmark-fixture.txt middleware/charset_native_benchmark_test.go
+          for source in 167e1e3bd039d060696b99c8da4e876ae04f42c1 35fea3e25b3e1e02f154fc5bd4213070b309ad15; do
+            git checkout --detach "$source"
+            git rev-parse HEAD > "artifacts/$source-source.txt"
+            git rev-parse HEAD:middleware/content_charset.go > "artifacts/$source-production-blob.txt"
+            go test ./middleware -run '^$' -bench '^BenchmarkContentCharsetMediaParameters$' -benchmem -benchtime=300ms -count=3 | tee "artifacts/$source-bench.log"
+          done
+          sha256sum artifacts/* > artifacts/SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: charset-parser-benchmark
+          path: artifacts/
