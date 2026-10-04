@@ -170,6 +170,8 @@ func TestContentCharsetMediaParameters(t *testing.T) {
 		{"quoted", `text/plain; charset="UTF-8"`, []string{"UTF-8"}, http.StatusAccepted},
 		{"quoted mixed case", `Text/Plain; Charset="uTf-8"`, []string{"UTF-8"}, http.StatusAccepted},
 		{"quoted pair", `text/plain; charset="UTF\-8"`, []string{"UTF-8"}, http.StatusAccepted},
+		{"escaped quote in preceding parameter", `text/plain; note="say \"charset=latin-1\""; charset=utf-8`, []string{"UTF-8"}, http.StatusAccepted},
+		{"literal backslash is not a quoted pair", `text/plain; charset="UTF\\-8"`, []string{"UTF-8", ""}, http.StatusUnsupportedMediaType},
 		{"preceding quoted parameter", `text/plain; note="charset=latin-1"; charset=utf-8`, []string{"UTF-8"}, http.StatusAccepted},
 		{"quoted semicolon", `text/plain; note="first; charset=latin-1"; charset="utf-8"`, []string{"UTF-8"}, http.StatusAccepted},
 		{"following parameter", `text/plain; charset="utf-8"; note="first; second"`, []string{"UTF-8"}, http.StatusAccepted},
