@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"mime"
 	"net/http"
 	"slices"
 	"strings"
@@ -33,6 +34,12 @@ func ContentCharset(charsets ...string) func(next http.Handler) http.Handler {
 
 // Check the content encoding against a list of acceptable values.
 func contentEncoding(ce string, charsets ...string) bool {
+	_, params, err := mime.ParseMediaType(ce)
+	if err == nil {
+		return slices.Contains(charsets, strings.ToLower(params["charset"]))
+	}
+
+	// Preserve the existing handling of absent or non-MIME header values.
 	_, ce = split(strings.ToLower(ce), ";")
 	_, ce = split(ce, "charset=")
 	ce, _ = split(ce, ";")
