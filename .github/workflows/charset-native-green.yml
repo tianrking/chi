@@ -1,0 +1,86 @@
+name: Charset native green validation
+on:
+  push:
+    branches: [codex/charset-native-green]
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+        go: [1.24.x, 1.25.x, 1.26.x, 1.27.x]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: 605e2ac9ffee8d1c42e10ef986c2b475f483400d
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+      - name: Record exact native source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          git rev-parse HEAD > artifacts/source-sha.txt
+          git rev-parse HEAD:middleware/content_charset.go > artifacts/production-blob.txt
+          git rev-parse HEAD:middleware/content_charset_test.go > artifacts/test-blob.txt
+          test "$(cat artifacts/source-sha.txt)" = 605e2ac9ffee8d1c42e10ef986c2b475f483400d
+          test "$(cat artifacts/test-blob.txt)" = e430493e4ae3452860784cc196a67e828392a487
+          git diff --exit-code 627048297ad8fdc3ef8a6d20847d4d6546b793a7 -- middleware/content_charset_test.go
+          go version > artifacts/go-version.txt
+          go env GOVERSION GOOS GOARCH > artifacts/go-environment.txt
+      - name: Frozen regressions with race detector
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          go test -race -json ./middleware -run '^TestContentCharsetMediaParameters' 2>&1 | tee artifacts/focused.jsonl
+          result=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$result" > artifacts/focused.exit
+          test "$result" -eq 0
+      - name: Official full make test
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          make test 2>&1 | tee artifacts/make-test.log
+          result=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$result" > artifacts/make-test.exit
+          test "$result" -eq 0
+      - name: Full vet
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          go vet ./... 2>&1 | tee artifacts/vet.log
+          result=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$result" > artifacts/vet.exit
+          test "$result" -eq 0
+      - name: Scoped goimports
+        if: matrix.os == 'ubuntu-24.04' && matrix.go == '1.24.x'
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install golang.org/x/tools/cmd/goimports@v0.31.0
+          "$(go env GOPATH)/bin/goimports" -l middleware/content_charset.go middleware/content_charset_test.go > artifacts/goimports.txt
+          test ! -s artifacts/goimports.txt
+      - name: Hash native evidence
+        if: always()
+        shell: bash
+        run: |
+          sha256sum artifacts/* > artifacts/SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: charset-green-${{ matrix.os }}-${{ matrix.go }}
+          path: artifacts/
