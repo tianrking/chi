@@ -33,6 +33,14 @@ jobs:
           git rev-parse HEAD:middleware/content_charset_test.go > artifacts/test-blob.txt
           test "$(cat artifacts/source-sha.txt)" = 35fea3e25b3e1e02f154fc5bd4213070b309ad15
           test "$(cat artifacts/test-blob.txt)" = 7d90b04bd596265d37e1f07bcb1cea6448e45a10
+          sha256sum middleware/content_charset.go middleware/content_charset_test.go > artifacts/source-before.sha256
+          git hash-object --path=middleware/content_charset.go middleware/content_charset.go > artifacts/worktree-production-before.blob
+          git hash-object --path=middleware/content_charset_test.go middleware/content_charset_test.go > artifacts/worktree-test-before.blob
+          test "$(cat artifacts/worktree-production-before.blob)" = 59a774dd53b5117b86ab936298b901ed81414173
+          test "$(cat artifacts/worktree-test-before.blob)" = 7d90b04bd596265d37e1f07bcb1cea6448e45a10
+          git diff --exit-code HEAD --
+          git status --porcelain --untracked-files=no > artifacts/tracked-status-before.txt
+          test ! -s artifacts/tracked-status-before.txt
           git diff --exit-code 9553bd4cd1b1ded136518fa834ebee1149be5e0d -- middleware/content_charset_test.go
           go version > artifacts/go-version.txt
           go env GOVERSION GOOS GOARCH > artifacts/go-environment.txt
@@ -74,6 +82,21 @@ jobs:
           go install golang.org/x/tools/cmd/goimports@v0.31.0
           "$(go env GOPATH)/bin/goimports" -l middleware/content_charset.go middleware/content_charset_test.go > artifacts/goimports.txt
           test ! -s artifacts/goimports.txt
+      - name: Verify tested working files after all checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum middleware/content_charset.go middleware/content_charset_test.go > artifacts/source-after.sha256
+          git hash-object --path=middleware/content_charset.go middleware/content_charset.go > artifacts/worktree-production-after.blob
+          git hash-object --path=middleware/content_charset_test.go middleware/content_charset_test.go > artifacts/worktree-test-after.blob
+          git rev-parse HEAD > artifacts/source-after-sha.txt
+          sha256sum -c artifacts/source-before.sha256 | tee artifacts/source-after-check.log
+          test "$(cat artifacts/worktree-production-after.blob)" = 59a774dd53b5117b86ab936298b901ed81414173
+          test "$(cat artifacts/worktree-test-after.blob)" = 7d90b04bd596265d37e1f07bcb1cea6448e45a10
+          test "$(cat artifacts/source-after-sha.txt)" = 35fea3e25b3e1e02f154fc5bd4213070b309ad15
+          git diff --exit-code HEAD -- > artifacts/tracked-diff-after.patch
+          git status --porcelain --untracked-files=no > artifacts/tracked-status-after.txt
+          test ! -s artifacts/tracked-status-after.txt
       - name: Hash native evidence
         if: always()
         shell: bash
@@ -83,56 +106,4 @@ jobs:
         if: always()
         with:
           name: charset-green-${{ matrix.os }}-${{ matrix.go }}
-          path: artifacts/
-  benchmark:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          ref: 35fea3e25b3e1e02f154fc5bd4213070b309ad15
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
-        with:
-          go-version: 1.24.x
-          cache: false
-      - name: Compare parser cost on the same native runner
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts
-          go version > artifacts/go-version.txt
-          cat > artifacts/benchmark-fixture.txt <<'GO'
-          package middleware
-          import "testing"
-          var charsetBenchmarkAccepted bool
-          func BenchmarkContentCharsetMediaParameters(b *testing.B) {
-              for _, tc := range []struct{name, header string}{
-                  {"unquoted", `text/plain; charset=UTF-8`},
-                  {"quoted", `text/plain; charset="UTF-8"`},
-                  {"quoted-pair", `text/plain; charset="UTF\-8"`},
-                  {"metadata", `text/plain; note="first; charset=latin-1"; charset=utf-8`},
-              } {
-                  b.Run(tc.name, func(b *testing.B) {
-                      b.ReportAllocs()
-                      for i := 0; i < b.N; i++ {
-                          charsetBenchmarkAccepted = contentEncoding(tc.header, "utf-8", "")
-                      }
-                  })
-              }
-          }
-          GO
-          cp artifacts/benchmark-fixture.txt middleware/charset_native_benchmark_test.go
-          for source in 167e1e3bd039d060696b99c8da4e876ae04f42c1 35fea3e25b3e1e02f154fc5bd4213070b309ad15; do
-            git checkout --detach "$source"
-            git rev-parse HEAD > "artifacts/$source-source.txt"
-            git rev-parse HEAD:middleware/content_charset.go > "artifacts/$source-production-blob.txt"
-            go test ./middleware -run '^$' -bench '^BenchmarkContentCharsetMediaParameters$' -benchmem -benchtime=300ms -count=3 | tee "artifacts/$source-bench.log"
-          done
-          sha256sum artifacts/* > artifacts/SHA256SUMS
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: charset-parser-benchmark
           path: artifacts/
